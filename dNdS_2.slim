@@ -1,0 +1,211 @@
+// set up a simulation of codon sequences
+initialize() {
+	
+	//setSeed(1455193095666);
+	
+	// definition of constants
+	defineConstant("rep",1);
+	defineConstant("mutrate",1e-7);
+	//defineConstant("recrate",1e-2);
+	//defineConstant("recrate",0);
+	defineConstant("recrate",0.5);
+	defineConstant("pop_size",500);
+	defineConstant("L",99999);
+	
+	// population split after 5N generations, + 20N generations runtime
+ 	defineConstant("pop_split",pop_size*10);
+	defineConstant("sim_end",pop_split+pop_size*40);
+	
+	// specification of the DFE
+	defineConstant("gamma_shape",0.15);
+	defineConstant("gamma_scale",-2500/(2*pop_size));
+	defineConstant("exp_mean",0.2/(2*pop_size));
+	defineConstant("pp",0.9);
+	
+	// initialization of parameters and settings
+	initializeMutationRate(mutrate);
+	
+	// m1 mutation type: neutral (dS)
+	// m2 and m3 mutation type: described by a DFE (dN)
+	initializeMutationType("m1", 0.5, "f", 0.0);
+	initializeMutationType("m2", 0.5, "g", gamma_scale, gamma_shape);
+	initializeMutationType("m3", 0.5, "e", exp_mean);
+	
+	m1.mutationStackPolicy = "f";
+	m2.mutationStackPolicy = "f";
+	m3.mutationStackPolicy = "f";
+	m1.convertToSubstitution = F;
+	m2.convertToSubstitution = F;
+	m3.convertToSubstitution = F;
+	
+	
+	// exon sequence: (non-non-syn)_ii
+	initializeGenomicElementType("g1", m1, 1);
+	initializeGenomicElementType("g2", c(m2,m3), c(pp,(1-pp)));
+
+	for (start in seq(from=0, to=L-2, by=2)){
+		initializeGenomicElement(g2, start, start);
+		initializeGenomicElement(g1, start+1, start+1);
+	}
+	
+	initializeRecombinationRate(recrate);
+	
+}
+
+// the actual RUN
+// create a population of pop_size individuals
+1 {
+	sim.addSubpop("p0", pop_size);
+}
+// instantaneous speciation without migration after 5N generations
+early () {
+	if(sim.generation == pop_split){
+		sim.addSubpopSplit("p1", pop_size, p0);
+		sim.addSubpopSplit("p2", pop_size, p0);
+		p0.setSubpopulationSize(0);
+	}
+}
+
+// compute dN/dS between two subpopulations 
+function (i)calcdNdS(o<Subpopulation>$ subpop1, o<Subpopulation>$ subpop2) 
+{ 
+
+	syn = sim.mutationsOfType(m1);
+	non = c(sim.mutationsOfType(m2),sim.mutationsOfType(m3));
+	p1f_syn = sim.mutationFrequencies(subpop1,syn);
+	p1f_non = sim.mutationFrequencies(subpop1,non);
+	p2f_syn = sim.mutationFrequencies(subpop2,syn);
+	p2f_non = sim.mutationFrequencies(subpop2,non);
+	
+	fixed1Not2_syn = syn[(p1f_syn == 1.0) & (p2f_syn == 0.0)];
+	fixed1Not2_non = non[(p1f_non == 1.0) & (p2f_non == 0.0)];
+	
+	fixed_muts = c(size(fixed1Not2_non),size(fixed1Not2_syn));
+
+	return fixed_muts;
+
+}  
+
+// compute dN/dS between two population samples
+function (i)calcdNdS_sample(o<Subpopulation>$ subpop1, o<Subpopulation>$ subpop2, i$ max_sample_size) 
+{ 
+
+	// obtain a random sample of genomes from the two populations
+	// -> sampling without replacement ??
+	p1_sample = sample(p1.genomes, max_sample_size, F);
+	p2_sample = sample(p2.genomes, 1, F);
+	
+	// compute synonymous fixed differences
+	fixed_syn = p1_sample[0].mutationsOfType(m1);
+	for (genome in p1_sample) 
+	{ 
+		mut_syn = genome.mutationsOfType(m1);
+		fixed_syn = setIntersection(fixed_syn, mut_syn);
+	} 
+	
+	fixed_diff_syn = setDifference(fixed_syn,p2_sample.mutationsOfType(m1));
+	
+	// compute non-synonymous fixed differences
+	fixed_non = c(p1_sample[0].mutationsOfType(m2),p1_sample[0].mutationsOfType(m3));
+	for (genome in p1_sample) 
+	{ 
+		mut_non = c(genome.mutationsOfType(m2),genome.mutationsOfType(m3));
+		fixed_non = setIntersection(fixed_non, mut_non);
+	} 
+	
+	fixed_diff_non = setDifference(fixed_non,c(p2_sample.mutationsOfType(m2),p2_sample.mutationsOfType(m3)));
+	
+	fixed_muts = c(size(fixed_diff_non),size(fixed_diff_syn));
+	
+	return fixed_muts;
+
+}  
+
+// output dN/dS after population split
+//	-> population dN/dS, as well as sample dN/dS ...
+1:300000 late() {
+	
+	t_CU = (sim.generation - pop_split)/(2*pop_size);
+	// only allow for biallelic states
+	muts = sim.mutations;
+	
+	// but allow sites that carry fixed ancestral mutations to mutate again
+	if(sim.generation < pop_split){
+		p0f_muts = sim.mutationFrequencies(p0,muts);
+		muts = muts[(p0f_muts < 1.0)];
+	}
+	else{
+		p1f_muts = sim.mutationFrequencies(p1,muts);
+		p2f_muts = sim.mutationFrequencies(p2,muts);
+		muts = muts[(p1f_muts < 1.0) | (p2f_muts < 1.0)];	
+	}
+	
+	newMuts = muts[muts.originGeneration == sim.generation];
+	counter = 0;
+	for (newMut in newMuts){
+		positionMuts = muts[muts.position == newMut.position];
+		if (size(positionMuts) > 1){
+			// remove mutations that happen at sites with a mutation segregating at this position already
+			sim.subpopulations.genomes.removeMutations(newMut);
+			counter = counter + 1;
+		}
+	}
+	writeFile(paste("/proj/sllstore2017033/nobackup/work/carina/my_slim/out_2/N"+pop_size+"_L"+L+"_r"+recrate+"_p"+pp+"_rep"+rep+"_counts.txt"),
+paste(t_CU + " " + counter),append=T);	
+
+	// print output every 100 generations after population split
+	if(sim.generation > pop_split & sim.generation % 100 == 0){
+		// compute dN/dS for m infty
+		fixed = calcdNdS(p1, p2);
+		
+		N_non = fixed[0];
+		N_syn = fixed[1];
+		dNdS = N_non/N_syn;
+		writeFile(paste("/proj/sllstore2017033/nobackup/work/carina/my_slim/out_2/N"+pop_size+"_L"+L+"_r"+recrate+"_p"+pp+"_m"+pop_size+"_rep"+rep+".txt"),
+paste(t_CU + " " + N_non + " " + N_syn + " " + dNdS),append=T);
+		
+		// compute sample dN/dS for m_1 = sample_size
+		sample_size=c(16,8,4,2,1);
+		for(mm_1 in sample_size){
+		fixed = calcdNdS_sample(p1, p2, mm_1);
+		N_non = fixed[0];
+		N_syn = fixed[1];
+		dNdS = N_non/N_syn;
+		writeFile(paste("/proj/sllstore2017033/nobackup/work/carina/my_slim/out_2/N"+pop_size+"_L"+L+"_r"+recrate+"_p"+pp+"_m"+mm_1+"_rep"+rep+".txt"),
+paste(t_CU + " " + N_non + " " + N_syn + " " + dNdS),append=T);
+		}	
+	}
+	
+	// compute fitness for each individual
+	for(individual in sim.subpopulations.individuals){
+		m2muts = individual.genomes.mutationsOfType(m2);
+		m3muts = individual.genomes.mutationsOfType(m3);
+		// additive fitness effects
+		individual.x = 1.0 + sum(m2muts.selectionCoeff) + sum(m3muts.selectionCoeff);
+	}
+	
+	// end simulation
+	if(sim.generation == sim_end){
+		sim.simulationFinished();
+	}
+}
+
+
+fitness(m2){return 1.0;}
+fitness(m3){return 1.0;}
+
+fitness(NULL,p0){
+//phenotype=individual fitness;
+phenotype=individual.x;
+return phenotype;}
+
+
+fitness(NULL,p1){
+//phenotype=individual fitness;
+phenotype=individual.x;
+return phenotype;}
+
+fitness(NULL,p2){
+//phenotype=individual fitness;
+phenotype=individual.x;
+return phenotype;}
